@@ -6,13 +6,19 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Chip,
   CircularProgress,
   Container,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
+  Grid,
   IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
   Snackbar,
   Stack,
   TextField,
@@ -32,10 +38,55 @@ function extractErrorMessage(data, fallbackMessage) {
   return fallbackMessage;
 }
 
+function isOverdue(todo) {
+  if (!todo.dueDate || todo.status === 'completed') {
+    return false;
+  }
+
+  const today = new Date();
+  const localDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const dueDate = new Date(`${todo.dueDate}T00:00:00`);
+
+  return dueDate < localDate;
+}
+
+function buildTodosUrl({ searchText, statusFilter, priorityFilter, dueDateRangeFilter, sortBy, sortOrder }) {
+  const queryParams = new URLSearchParams();
+
+  if (searchText.trim()) {
+    queryParams.set('search', searchText.trim());
+  }
+
+  if (statusFilter !== 'all') {
+    queryParams.set('status', statusFilter);
+  }
+
+  if (priorityFilter !== 'all') {
+    queryParams.set('priority', priorityFilter);
+  }
+
+  if (dueDateRangeFilter !== 'all') {
+    queryParams.set('dueDateRange', dueDateRangeFilter);
+  }
+
+  queryParams.set('sortBy', sortBy);
+  queryParams.set('sortOrder', sortOrder);
+
+  const queryString = queryParams.toString();
+  return queryString ? `/api/todos?${queryString}` : '/api/todos';
+}
+
 function App() {
   const [todos, setTodos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  const [searchText, setSearchText] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [priorityFilter, setPriorityFilter] = useState('all');
+  const [dueDateRangeFilter, setDueDateRangeFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('createdAt');
+  const [sortOrder, setSortOrder] = useState('desc');
 
   const [newTitle, setNewTitle] = useState('');
   const [newDescription, setNewDescription] = useState('');
@@ -49,6 +100,8 @@ function App() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [todoToDelete, setTodoToDelete] = useState(null);
 
+  const [clearCompletedDialogOpen, setClearCompletedDialogOpen] = useState(false);
+
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
 
   const completedCount = useMemo(
@@ -56,14 +109,24 @@ function App() {
     [todos]
   );
 
+  const overdueCount = useMemo(() => todos.filter((todo) => isOverdue(todo)).length, [todos]);
+
   useEffect(() => {
     fetchTodos();
-  }, []);
+  }, [searchText, statusFilter, priorityFilter, dueDateRangeFilter, sortBy, sortOrder]);
 
   const fetchTodos = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/todos');
+      const url = buildTodosUrl({
+        searchText,
+        statusFilter,
+        priorityFilter,
+        dueDateRangeFilter,
+        sortBy,
+        sortOrder,
+      });
+      const response = await fetch(url);
       const data = await response.json();
 
       if (!response.ok) {
@@ -115,7 +178,7 @@ function App() {
         throw new Error(extractErrorMessage(data, 'Failed to create task'));
       }
 
-      setTodos((previous) => [data, ...previous]);
+      await fetchTodos();
       resetCreateForm();
       showSnackbar('Task created');
       setError('');
@@ -133,7 +196,7 @@ function App() {
         throw new Error(extractErrorMessage(data, 'Failed to update task status'));
       }
 
-      setTodos((previous) => previous.map((todo) => (todo.id === todoId ? data : todo)));
+      await fetchTodos();
       showSnackbar(data.status === 'completed' ? 'Task completed' : 'Task marked active');
     } catch (err) {
       showSnackbar(err.message || 'Failed to update task status', 'error');
@@ -176,7 +239,7 @@ function App() {
         throw new Error(extractErrorMessage(data, 'Failed to update task'));
       }
 
-      setTodos((previous) => previous.map((todo) => (todo.id === todoId ? data : todo)));
+      await fetchTodos();
       cancelEditing();
       showSnackbar('Task updated');
     } catch (err) {
@@ -207,11 +270,37 @@ function App() {
         throw new Error(extractErrorMessage(data, 'Failed to delete task'));
       }
 
-      setTodos((previous) => previous.filter((todo) => todo.id !== todoToDelete.id));
+      await fetchTodos();
       showSnackbar('Task deleted');
       cancelDelete();
     } catch (err) {
       showSnackbar(err.message || 'Failed to delete task', 'error');
+    }
+  };
+
+  const resetFilters = () => {
+    setSearchText('');
+    setStatusFilter('all');
+    setPriorityFilter('all');
+    setDueDateRangeFilter('all');
+    setSortBy('createdAt');
+    setSortOrder('desc');
+  };
+
+  const handleClearCompleted = async () => {
+    try {
+      const response = await fetch('/api/todos/completed', { method: 'DELETE' });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(data, 'Failed to clear completed tasks'));
+      }
+
+      await fetchTodos();
+      setClearCompletedDialogOpen(false);
+      showSnackbar(`Cleared ${data.deletedCount} completed task${data.deletedCount === 1 ? '' : 's'}`);
+    } catch (err) {
+      showSnackbar(err.message || 'Failed to clear completed tasks', 'error');
     }
   };
 
@@ -269,6 +358,112 @@ function App() {
 
         <Card>
           <CardContent>
+            <Stack spacing={2}>
+              <Typography variant="h6" component="h2">
+                Find and organize
+              </Typography>
+
+              <TextField
+                label="Search tasks"
+                value={searchText}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Search by title or description"
+                fullWidth
+                inputProps={{ 'aria-label': 'Search tasks' }}
+              />
+
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={6} md={3}>
+                  <FormControl fullWidth>
+                    <InputLabel id="status-filter-label">Status</InputLabel>
+                    <Select
+                      labelId="status-filter-label"
+                      label="Status"
+                      value={statusFilter}
+                      onChange={(event) => setStatusFilter(event.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="active">Active</MenuItem>
+                      <MenuItem value="completed">Completed</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+
+                <Grid item xs={12} sm={6} md={3}>
+                  <FormControl fullWidth>
+                    <InputLabel id="priority-filter-label">Priority</InputLabel>
+                    <Select
+                      labelId="priority-filter-label"
+                      label="Priority"
+                      value={priorityFilter}
+                      onChange={(event) => setPriorityFilter(event.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="high">High</MenuItem>
+                      <MenuItem value="medium">Medium</MenuItem>
+                      <MenuItem value="low">Low</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+
+                <Grid item xs={12} sm={6} md={3}>
+                  <FormControl fullWidth>
+                    <InputLabel id="due-filter-label">Due date</InputLabel>
+                    <Select
+                      labelId="due-filter-label"
+                      label="Due date"
+                      value={dueDateRangeFilter}
+                      onChange={(event) => setDueDateRangeFilter(event.target.value)}
+                    >
+                      <MenuItem value="all">All</MenuItem>
+                      <MenuItem value="today">Today</MenuItem>
+                      <MenuItem value="week">This week</MenuItem>
+                      <MenuItem value="overdue">Overdue</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+
+                <Grid item xs={12} sm={6} md={3}>
+                  <FormControl fullWidth>
+                    <InputLabel id="sort-by-label">Sort by</InputLabel>
+                    <Select
+                      labelId="sort-by-label"
+                      label="Sort by"
+                      value={sortBy}
+                      onChange={(event) => setSortBy(event.target.value)}
+                    >
+                      <MenuItem value="createdAt">Created date</MenuItem>
+                      <MenuItem value="dueDate">Due date</MenuItem>
+                      <MenuItem value="priority">Priority</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+              </Grid>
+
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
+                <FormControl sx={{ minWidth: 180 }}>
+                  <InputLabel id="sort-order-label">Sort order</InputLabel>
+                  <Select
+                    labelId="sort-order-label"
+                    label="Sort order"
+                    value={sortOrder}
+                    onChange={(event) => setSortOrder(event.target.value)}
+                  >
+                    <MenuItem value="asc">Ascending</MenuItem>
+                    <MenuItem value="desc">Descending</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <Button variant="outlined" onClick={resetFilters}>
+                  Reset controls
+                </Button>
+              </Stack>
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent>
             <Stack
               direction={{ xs: 'column', sm: 'row' }}
               justifyContent="space-between"
@@ -279,8 +474,27 @@ function App() {
               <Typography variant="h6" component="h2">
                 Tasks
               </Typography>
-              <Typography color="text.secondary">{completedCount} completed</Typography>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Chip label={`${completedCount} completed`} size="small" />
+                <Chip
+                  label={`${overdueCount} overdue`}
+                  size="small"
+                  color={overdueCount > 0 ? 'warning' : 'default'}
+                />
+                <Button
+                  color="error"
+                  variant="outlined"
+                  onClick={() => setClearCompletedDialogOpen(true)}
+                  disabled={completedCount === 0}
+                >
+                  Clear completed
+                </Button>
+              </Stack>
             </Stack>
+
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }} aria-live="polite">
+              Showing {todos.length} task{todos.length === 1 ? '' : 's'}.
+            </Typography>
 
             {loading && (
               <Stack direction="row" spacing={1} alignItems="center" role="status" aria-label="loading">
@@ -358,6 +572,15 @@ function App() {
                                     {todo.description}
                                   </Typography>
                                 )}
+                                <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.75 }}>
+                                  <Chip
+                                    size="small"
+                                    label={`Priority: ${todo.priority}`}
+                                    color={todo.priority === 'high' ? 'error' : 'default'}
+                                    variant="outlined"
+                                  />
+                                  {isOverdue(todo) && <Chip size="small" label="Overdue" color="warning" />}
+                                </Stack>
                                 {todo.dueDate && (
                                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                                     Due: {todo.dueDate}
@@ -422,6 +645,25 @@ function App() {
           <Button onClick={cancelDelete}>Cancel</Button>
           <Button onClick={handleDelete} color="error" variant="contained">
             Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={clearCompletedDialogOpen}
+        onClose={() => setClearCompletedDialogOpen(false)}
+        aria-labelledby="clear-completed-dialog-title"
+      >
+        <DialogTitle id="clear-completed-dialog-title">Clear completed tasks?</DialogTitle>
+        <DialogContent>
+          <Typography>
+            This will remove all completed tasks. This is a destructive action and cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setClearCompletedDialogOpen(false)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={handleClearCompleted}>
+            Clear completed
           </Button>
         </DialogActions>
       </Dialog>

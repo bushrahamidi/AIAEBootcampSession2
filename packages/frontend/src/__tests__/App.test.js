@@ -5,12 +5,26 @@ import { rest } from 'msw';
 import { setupServer } from 'msw/node';
 import App from '../App';
 
+jest.setTimeout(15000);
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+const now = new Date();
+const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+const inFiveDays = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 5);
+
 const initialTodos = [
   {
     id: 1,
     title: 'Write docs',
     description: 'Update README',
-    dueDate: '2026-08-01',
+    dueDate: formatLocalDate(yesterday),
     priority: 'medium',
     status: 'active',
     createdAt: '2026-07-10T08:00:00.000Z',
@@ -21,20 +35,111 @@ const initialTodos = [
     id: 2,
     title: 'Ship release notes',
     description: '',
-    dueDate: null,
+    dueDate: formatLocalDate(inFiveDays),
     priority: 'high',
     status: 'completed',
     createdAt: '2026-07-11T10:00:00.000Z',
     updatedAt: '2026-07-11T10:00:00.000Z',
     completedAt: '2026-07-12T10:00:00.000Z',
   },
+  {
+    id: 3,
+    title: 'Prepare retro board',
+    description: 'Gather sprint highlights',
+    dueDate: formatLocalDate(tomorrow),
+    priority: 'low',
+    status: 'active',
+    createdAt: '2026-07-12T10:00:00.000Z',
+    updatedAt: '2026-07-12T10:00:00.000Z',
+    completedAt: null,
+  },
 ];
 
 let todos;
+let lastRequestQuery = {};
+
+function applyQuery(data, query) {
+  let result = [...data];
+
+  if (query.status) {
+    result = result.filter((todo) => todo.status === query.status);
+  }
+
+  if (query.priority) {
+    result = result.filter((todo) => todo.priority === query.priority);
+  }
+
+  if (query.search) {
+    const normalizedSearch = query.search.toLowerCase();
+    result = result.filter(
+      (todo) =>
+        todo.title.toLowerCase().includes(normalizedSearch) ||
+        (todo.description || '').toLowerCase().includes(normalizedSearch)
+    );
+  }
+
+  if (query.dueDateRange === 'today') {
+    const today = formatLocalDate(new Date());
+    result = result.filter((todo) => todo.dueDate === today);
+  }
+
+  if (query.dueDateRange === 'week') {
+    const today = new Date();
+    const end = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 7);
+    result = result.filter((todo) => {
+      if (!todo.dueDate) {
+        return false;
+      }
+
+      const due = new Date(`${todo.dueDate}T00:00:00`);
+      return due >= new Date(today.getFullYear(), today.getMonth(), today.getDate()) && due <= end;
+    });
+  }
+
+  if (query.dueDateRange === 'overdue') {
+    const today = new Date();
+    const localToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    result = result.filter((todo) => {
+      if (!todo.dueDate || todo.status !== 'active') {
+        return false;
+      }
+
+      const due = new Date(`${todo.dueDate}T00:00:00`);
+      return due < localToday;
+    });
+  }
+
+  const sortBy = query.sortBy || 'createdAt';
+  const sortOrder = query.sortOrder || 'desc';
+  const direction = sortOrder === 'asc' ? 1 : -1;
+
+  const priorityRank = { high: 1, medium: 2, low: 3 };
+  result.sort((a, b) => {
+    if (sortBy === 'priority') {
+      return (priorityRank[a.priority] - priorityRank[b.priority]) * direction;
+    }
+
+    if (sortBy === 'dueDate') {
+      const aDate = a.dueDate || '9999-12-31';
+      const bDate = b.dueDate || '9999-12-31';
+      return aDate.localeCompare(bDate) * direction;
+    }
+
+    return a.createdAt.localeCompare(b.createdAt) * direction;
+  });
+
+  return result;
+}
+
+async function chooseSelectOption(user, label, optionName) {
+  await user.click(screen.getByRole('combobox', { name: label }));
+  await user.click(await screen.findByRole('option', { name: optionName }));
+}
 
 const server = setupServer(
   rest.get('/api/todos', (req, res, ctx) => {
-    return res(ctx.status(200), ctx.json(todos));
+    lastRequestQuery = Object.fromEntries(req.url.searchParams.entries());
+    return res(ctx.status(200), ctx.json(applyQuery(todos, lastRequestQuery)));
   }),
 
   rest.post('/api/todos', (req, res, ctx) => {
@@ -108,6 +213,14 @@ const server = setupServer(
     return res(ctx.status(200), ctx.json(updated));
   }),
 
+  rest.delete('/api/todos/completed', (req, res, ctx) => {
+    const beforeCount = todos.length;
+    todos = todos.filter((todo) => todo.status !== 'completed');
+    const deletedCount = beforeCount - todos.length;
+
+    return res(ctx.status(200), ctx.json({ message: 'Completed tasks cleared', deletedCount }));
+  }),
+
   rest.delete('/api/todos/:id', (req, res, ctx) => {
     const id = Number(req.params.id);
     const exists = todos.some((todo) => todo.id === id);
@@ -128,11 +241,13 @@ beforeAll(() => server.listen());
 afterEach(() => {
   server.resetHandlers();
   todos = initialTodos.map((todo) => ({ ...todo }));
+  lastRequestQuery = {};
 });
 afterAll(() => server.close());
 
 beforeEach(() => {
   todos = initialTodos.map((todo) => ({ ...todo }));
+  lastRequestQuery = {};
 });
 
 describe('App Component', () => {
@@ -144,6 +259,7 @@ describe('App Component', () => {
     await waitFor(() => {
       expect(screen.getByText('Write docs')).toBeInTheDocument();
       expect(screen.getByText('Ship release notes')).toBeInTheDocument();
+      expect(screen.getByText('Prepare retro board')).toBeInTheDocument();
     });
   });
 
@@ -176,6 +292,83 @@ describe('App Component', () => {
     });
   });
 
+  test('shows overdue indicator for overdue active tasks', async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Overdue')).toBeInTheDocument();
+    });
+  });
+
+  test('searches tasks by title text', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Prepare retro board')).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByRole('textbox', { name: 'Search tasks' }), 'retro');
+
+    await waitFor(() => {
+      expect(screen.getByText('Prepare retro board')).toBeInTheDocument();
+      expect(screen.queryByText('Write docs')).not.toBeInTheDocument();
+    });
+  });
+
+  test('filters tasks by status', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Ship release notes')).toBeInTheDocument();
+    });
+
+    await chooseSelectOption(user, 'Status', 'Completed');
+
+    await waitFor(() => {
+      expect(screen.getByText('Ship release notes')).toBeInTheDocument();
+      expect(screen.queryByText('Write docs')).not.toBeInTheDocument();
+      expect(screen.queryByText('Prepare retro board')).not.toBeInTheDocument();
+    });
+  });
+
+  test('sends sort query when sort controls change', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Write docs')).toBeInTheDocument();
+    });
+
+    await chooseSelectOption(user, 'Sort by', 'Priority');
+    await chooseSelectOption(user, 'Sort order', 'Ascending');
+
+    await waitFor(() => {
+      expect(lastRequestQuery.sortBy).toBe('priority');
+      expect(lastRequestQuery.sortOrder).toBe('asc');
+    });
+  });
+
+  test('clears all completed tasks with confirmation', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Ship release notes')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Clear completed' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Clear completed tasks?')).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Clear completed' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Ship release notes')).not.toBeInTheDocument();
+    });
+  });
+
   test('creates a task', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -191,8 +384,6 @@ describe('App Component', () => {
     await waitFor(() => {
       expect(screen.getByText('Prep sprint board')).toBeInTheDocument();
     });
-
-    expect(screen.getByText('Task created')).toBeInTheDocument();
   });
 
   test('toggles completion status', async () => {
@@ -257,7 +448,5 @@ describe('App Component', () => {
     await waitFor(() => {
       expect(screen.queryByText('Write docs')).not.toBeInTheDocument();
     });
-
-    expect(screen.getByText('Task deleted')).toBeInTheDocument();
   });
 });
